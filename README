@@ -1,92 +1,133 @@
-!!! This is copied from documentation for smbk5pwd, it may not apply to
-!!! smbkrb5pwd.  smbkrb5pwd is a modified version of smbk5pwd,
-!!! to support MIT Kerberos.
+Documentation is available at: https://github.com/opinsys/smbkrb5pwd/wiki
 
-This directory contains a slapd overlay, smbkrb5pwd, that extends the
-PasswordModify Extended Operation to update Kerberos keys and Samba
-password hashes for an LDAP user.
 
-The Kerberos support is written for Heimdal using its hdb-ldap backend.
-If a PasswordModify is performed on an entry that has the krb5KDCEntry
-objectclass, then the krb5Key and krb5KeyVersionNumber will be updated
-using the new password in the PasswordModify request. Additionally, a
-new "{K5KEY}" password hash mechanism is provided. For krb5KDCEntries that
-have this hash specifier in their userPassword attribute, Simple Binds
-will be checked against the Kerberos keys of the Entry. No data is
-needed after the "{K5KEY}" hash specifier in the userPassword, it is
-looked up from the Entry directly.
+OVERVIEW
 
-The Samba support is written using the Samba 3.0 LDAP schema. If a
-PasswordModify is performed on an entry that has the sambaSamAccount
-objectclass, then the sambaLMPassword, sambaNTPassword, and sambaPwdLastSet
-attributes will be updated accordingly.
+smbkrb5pwd is an OpenLDAP (slapd) overlay to change LDAP, Samba and MIT 
+Kerberos passwords at the same time. It intercepts the LDAP 
+PasswordModify Extended Operations, changes LDAP attributes for LDAP and 
+Samba authentication and connects to kadmind to change the kerberos 
+password. It is similar to smbk5pwd overlay for Heimdal kerberos, but 
+smbkrb5pwd does not change kerberos attributes itself, but connects to 
+kadmind instead. Thus smbkrb5pwd needs a kerberos principal to connect 
+to kadmind to manage the user principals. MIT Kerberos can use LDAP 
+backend to store its data, but it should not be necessary.
 
-To use the overlay, add:
+When LDAP password is changed, the overlay checks whether a principal 
+uid@REALM exists and creates it if it does not. If the principal exists, 
+only the password is changed.
 
-	include <path to>/krb5-kdc.schema
-	include <path to>/samba.schema
 
-	moduleload <path to>smbkrb5pwd.so
-	...
+KNOWN LIMITATIONS
 
-	database bdb
-	...
-	overlay smbkrb5pwd
+* Because of locking issues, kerberos data cannot be stored in same 
+  objects as users
+* Principals are always named uid@REALM and cannot be changed
+* If uid in LDAP is changed, the old kerberos principal is not deleted 
+  automatically
+* If LDAP user is deleted, the kerberos principal is not deleted 
+  automatically
 
-to your slapd configuration file. (You should obtain the necessary schema
-files from the Heimdal and/or Samba distributions. At this time, there
-are several known errors in these schema files that you will have to
-correct before they will load in slapd.  As of Samba 3.0 the schema looks
-fine as shipped.)
 
-All modules compiled in (i.e. krb5 and samba) are enabled; the statement
+INSTALLATION
 
-	smbkrb5pwd-enable		<module>
+To compile the overlay the easiest way is to get the full source code 
+for OpenLDAP and place the smbkrb5pwd directory under 
+contrib/slapd-modules directory. After compiling OpenLDAP normally the 
+overlay can be compiled simply by running make in the smbkrb5pwd 
+directory.
 
-can be used to enable only the desired one(s); legal values for <module>
-are "krb5" and "samba", if they are respectively enabled by defining
-DO_KRB5 and DO_SAMBA.
 
-The samba module also supports the
+cd contrib/slapd-modules/smbkrb5pwd
+make
+sudo cp .libs/* /usr/lib/ldap/
 
-	smbkrb5pwd-must-change	<seconds>
 
-which sets the "sambaPwdMustChange" attribute accordingly to force passwd
-expiry.  A value of 0 disables this feature.
+SLAPD CONFIGURATION
 
-The overlay now supports table-driven configuration, and thus can be run-time
-loaded and configured via back-config.  The layout of the entry is
+To configure the overlay, the module needs to be loaded and configured 
+for the database.
 
-	# {0}smbkrb5pwd, {1}bdb, config
-	dn: olcOverlay={0}smbkrb5pwd,olcDatabase={1}bdb,cn=config
-	objectClass: olcOverlayConfig
-	objectClass: olcSmbKrb5PwdConfig
-	olcOverlay: {0}smbkrb5pwd
-	olcSmbKrb5PwdEnable: krb5
-	olcSmbKrb5PwdEnable: samba
-	olcSmbKrb5PwdMustChange: 2592000
 
-which enables both krb5 and samba modules with a password expiry time
-of 30 days.
+dn: cn=module{0},cn=config
+objectClass: olcModuleList
+cn: module
+olcModulepath: /usr/lib/ldap
+olcModuleload: {0}back_hdb
+olcModuleload: {1}smbkrb5pwd
 
-The provided Makefile builds both Kerberos and Samba support by default.
-You must edit the Makefile to insure that the correct include and library
-paths are used. You can change the DEFS macro if you only want one or the
-other of Kerberos or Samba support.
+dn: olcOverlay={0}smbkrb5pwd,olcDatabase={1}hdb,cn=config
+objectClass: olcOverlayConfig
+objectClass: olcSmbKrb5PwdConfig
+olcOverlay: {0}smbkrb5pwd
+olcSmbKrb5PwdEnable: samba
+olcSmbKrb5PwdEnable: krb5
+olcSmbKrb5PwdMustChange: 2592012
+olcSmbKrb5PwdKrb5Realm: EDU.EXAMPLE.ORG
+olcSmbKrb5PwdRequiredClass: posixAccount
 
-This overlay is only set up to be built as a dynamically loaded module.
-On most platforms, in order for the module to be usable, all of the 
-library dependencies must also be available as shared libraries.
 
-If you need to build the overlay statically, you will have to move it into the
-slapd/overlays directory and edit the Makefile and overlays.c to reference
-it. You will also have to define SLAPD_OVER_SMBKRB5PWD to SLAPD_MOD_STATIC,
-and add the relevant libraries to the main slapd link command.
+The overlay accepts the following configuration attributes:
 
----
-This work is part of OpenLDAP Software <http://www.openldap.org/>.
-Copyright 2004-2009 The OpenLDAP Foundation.
+* olcSmbKrb5PwdEnable - samba / krb5
+  - Enable samba/kerberos functionality of the module, same as 
+    olcSmbK5PwdEnable in smbk5pwd. If attribute is not set or both are set, 
+    both passwords are changed.
+* olcSmbKrb5PwdMustChange - e.g. 31536000 (year), 2592000 (30 seconds)
+  - Time in seconds before the password expires (currently affects only Samba)
+* olcSmbKrb5PwdKrb5Realm - e.g. EDU.EXAMPLE.ORG
+  - Kerberos realm used to create user principals
+* olcSmbKrb5PwdRequiredClass - e.g. posixAccount
+  - If set, the entry needs to have this object class for the kerberos 
+    principal and samba passwords to be modified
+
+
+KERBEROS PRINCIPAL
+
+smbkrb5pwd connects to kadmind using a principal found in keytab file 
+/etc/ldap/slapd.d/openldap-krb5.keytab. The keytab is searched for 
+principal that has name smbkrb5pwd/FQDN@REALM. Note that “hostname -f” 
+should return fqdn. One way to achieve this is to put fqdn as the first 
+name in /etc/hosts for the server’s ip address (here 10.11.12.13):
+
+
+10.11.12.13   server.edu.example.org server
+
+
+Creating the principal and exporting it to a keytab file can be done 
+with the following commands:
+
+
+kadmin.local -q "addprinc -randkey smbkrb5pwd/server.edu.example.org@EDU.EXAMPLE.ORG"
+kadmin.local -q "ktadd -e des-cbc-crc:normal -k /etc/ldap/slapd.d/openldap-krb5.keytab \
+ smbkrb5pwd/server.edu.example.org@EDU.EXAMPLE.ORG"
+
+chown openldap.openldap /etc/ldap/slapd.d/openldap-krb5.keytab
+
+
+TESTING
+
+The overlay activates itself when an password change exop request is 
+made. This can be done for example with ldappasswd command:
+
+ldappasswd -x -D uid=admin,ou=people,dc=edu,dc=example,dc=org -W \
+ uid=user1,ou=people,dc=edu,dc=example,dc=org
+
+smbkrb5pwd writes debug information to slapd’s logfile which is normally 
+/var/log/syslog in Ubuntu.
+
+
+LICENSE
+
+smbkrb5pwd is based on smbk5pwd overlay that can be found under 
+http://www.openldap.org/devel/cvsweb.cgi/contrib/slapd-modules/smbk5pwd
+in OpenLDAP's sources. smbkrb5pwd is licensed under The OpenLDAP Public 
+License that is also used for smbk5pwd.
+
+
+Copyright 2004-2010 The OpenLDAP Foundation.
 Portions Copyright 2004-2005 Howard Chu, Symas Corp. All rights reserved.
+Portions Copyright 2010 Opinsys Oy.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted only as authorized by the OpenLDAP
@@ -95,4 +136,3 @@ Public License.
 A copy of this license is available in the file LICENSE in the
 top-level directory of the distribution or, alternatively, at
 <http://www.OpenLDAP.org/license.html>.
-
