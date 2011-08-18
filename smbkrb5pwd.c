@@ -275,6 +275,10 @@ static int krb5_set_passwd(
 	int rc;
 	size_t user_princstr_size;
 
+	if (!access_allowed(op, e, slap_schema.si_ad_userPassword, NULL,
+			    ACL_WRITE, NULL))
+		return LDAP_INSUFFICIENT_ACCESS;
+
 	rc = LDAP_LOCAL_ERROR;
 
 	if (ldap_pvt_thread_mutex_trylock(&pi->krb5_mutex)) {
