@@ -198,7 +198,7 @@ static int krb5_set_passwd(
 	kadm5_ret_t retval;
 	krb5_context context;
 	Attribute *a_objectclass, *a_uid;
-	char *user_uid, *user_password, *user_princstr;
+	char *user_uid = NULL, *user_password = NULL, *user_princstr = NULL;
 	int rc;
 	size_t user_princstr_size;
 
@@ -243,8 +243,11 @@ static int krb5_set_passwd(
 		goto mitkrb_error_with_mutex_lock;
 	}
 
-	user_uid = a_uid->a_vals[0].bv_val;
-	user_password = qpw->rs_new.bv_val;
+	user_uid = calloc(a_uid->a_vals[0].bv_len + 1, 1);
+        user_password = calloc(qpw->rs_new.bv_len + 1, 1);
+
+        memcpy(user_uid, a_uid->a_vals[0].bv_val, a_uid->a_vals[0].bv_len);
+        memcpy(user_password, qpw->rs_new.bv_val, qpw->rs_new.bv_len);
 
 	retval = kadm5_init_krb5_context(&context);
 	if (retval) {
@@ -339,6 +342,12 @@ mitkrb_error_with_context:
 mitkrb_error_with_mutex_lock:
 	ldap_pvt_thread_mutex_unlock(&pi->krb5_mutex);
 finish:
+	if (user_uid)
+	  free(user_uid);
+
+	if (user_password)
+	  free(user_password);
+
 	return rc;
 }
 
