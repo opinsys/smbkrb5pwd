@@ -201,6 +201,8 @@ static int krb5_set_passwd(
 	char *user_uid = NULL, *user_password = NULL, *user_princstr = NULL;
 	int rc;
 	size_t user_princstr_size;
+	char *admin_princstr = NULL;
+	int admin_princstr_len;
 
 	if (!access_allowed(op, e, slap_schema.si_ad_userPassword, NULL,
 			    ACL_WRITE, NULL))
@@ -259,18 +261,23 @@ static int krb5_set_passwd(
 		goto mitkrb_error_with_mutex_lock;
 	}
 
+	admin_princstr_len = strlen("root/admin@") + strlen(pi->kerberos_realm) + 1;
+	admin_princstr = calloc(admin_princstr_len + 1, 1);
+
+	snprintf(admin_princstr, admin_princstr_len, "root/admin@%s", pi->kerberos_realm);
+
 	params.mask |= KADM5_CONFIG_REALM;
 	params.realm = pi->kerberos_realm;
-	retval = kadm5_init_with_skey(context, pi->admin_princstr, KRB5_KEYTAB,
-				      KADM5_ADMIN_SERVICE, &params,
-				      KADM5_STRUCT_VERSION,
-				      KADM5_API_VERSION_3, NULL,
-				      &kadm5_handle);
+	retval = kadm5_init_with_password(context, admin_princstr, NULL,
+					  NULL, &params,
+					  KADM5_STRUCT_VERSION,
+					  KADM5_API_VERSION_3, NULL,
+					  &kadm5_handle);
 	if (retval) {
-		Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
-		      "smbkrb5pwd %s : kadm5_init_with_skey() failed"
-		      " for user %s: %s\n",
-		      op->o_log_prefix, user_uid, error_message(retval));
+		Log4(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+		      "smbkrb5pwd %s : kadm5_init_with_password() failed"
+		      " for user %s (%s): %s\n",
+  		      op->o_log_prefix, user_uid, admin_princstr, error_message(retval));
 		rc = LDAP_CONNECT_ERROR;
 		goto mitkrb_error_with_context;
 	}
@@ -347,6 +354,8 @@ finish:
 
 	if (user_password)
 	  free(user_password);
+	if (admin_princstr)
+	  free(admin_princstr);
 
 	return rc;
 }
