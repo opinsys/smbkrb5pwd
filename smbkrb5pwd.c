@@ -171,10 +171,10 @@ lookup_admin_princstr(
 	size_t princstr_size = sizeof("smbkrb5pwd/")
 			       + strlen(fqdn)
 			       + sizeof("@")
-			       + strlen(kerberos_realm) + 1;
+			       + strlen(kerberos_realm);
 	if (*admin_princstr)
 		free(*admin_princstr);
-	if ((*admin_princstr = malloc(princstr_size)) == NULL)
+	if ((*admin_princstr = calloc(princstr_size + 1, 1)) == NULL)
 		goto error_with_host_addr;
 	snprintf(*admin_princstr, princstr_size, "smbkrb5pwd/%s@%s", fqdn,
 		 kerberos_realm);
@@ -275,7 +275,7 @@ static int krb5_set_passwd(
 	user_princstr_size = strlen(user_uid)
 			     + sizeof("@")
 			     + strlen(pi->kerberos_realm);
-	if ((user_princstr = malloc(user_princstr_size)) == NULL) {
+	if ((user_princstr = calloc(user_princstr_size + 1, 1)) == NULL) {
 		rc = LDAP_CONNECT_ERROR;
 		goto mitkrb_error_with_kadm5_handle;
 	}
