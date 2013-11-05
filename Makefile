@@ -20,7 +20,7 @@ SSL_INC=
 LDAP_INC=-I../../../include -I../../../servers/slapd -I../../../../../include -I../../../../../servers/slapd -I../../../debian/build/include
 INCS=$(LDAP_INC) $(SSL_INC)
 
-KRB5_LIB=-lkrb5 -lkadm5clnt_mit
+KRB5_LIB=-lkrb5 -lkadm5srv_mit
 SSL_LIB=-lcrypto
 LDAP_LIB=-L../../../debian/build/libraries/libldap_r/.libs -lldap_r \
 	 -L../../../debian/build/libraries/liblber/.libs -llber
