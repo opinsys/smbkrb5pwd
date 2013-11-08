@@ -148,7 +148,7 @@ lookup_admin_princstr(
 {
 	char fqdn[NI_MAXHOST] = "";
 	char hostname[HOST_NAME_MAX+1];
-	struct addrinfo *host_addr = 0;
+	struct addrinfo *host_addr = NULL;
 	int rc;
 
 	rc = -1;
