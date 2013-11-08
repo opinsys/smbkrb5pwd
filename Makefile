@@ -46,7 +46,7 @@ smbkrb5pwd.lo:	smbkrb5pwd.c
 	$(LIBTOOL) --mode=compile $(CC) $(CLNT_OPT) $(OPT) $(DEFS) $(INCS) -c $?
 
 smbkrb5pwd.la:	smbkrb5pwd.lo
-	$(LIBTOOL) --mode=link $(CC) $(MIT_KRB5_CLNT_LIB) $(OPT) -version-info 0:0:0 \
+	$(LIBTOOL) --mode=link $(CC) $(MIT_KRB5_CLNT_LIB) $(OPT) -version-info 0:1:0 \
 	-rpath $(moduledir) -module -o $@ $? $(LIBS) $(MIT_KRB5_CLNT_LIB)
 
 smbkrb5pwd_srv.lo:	smbkrb5pwd.c
