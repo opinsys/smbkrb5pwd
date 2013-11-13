@@ -56,7 +56,6 @@ typedef unsigned char DES_cblock[8];
 #endif
 #include "ldap_utf8.h"
 
-static AttributeDescription *ad_sambaLMPassword;
 static AttributeDescription *ad_sambaNTPassword;
 static AttributeDescription *ad_sambaPwdLastSet;
 static AttributeDescription *ad_sambaPwdMustChange;
@@ -92,29 +91,6 @@ static int smbkrb5pwd_modules_init( smbkrb5pwd_t *pi );
 
 static const char hex[] = "0123456789abcdef";
 
-/* From liblutil/passwd.c... */
-static void lmPasswd_to_key(
-	const char *lmPasswd,
-	DES_cblock *key)
-{
-	const unsigned char *lpw = (const unsigned char *)lmPasswd;
-	unsigned char *k = (unsigned char *)key;
-
-	/* make room for parity bits */
-	k[0] = lpw[0];
-	k[1] = ((lpw[0]&0x01)<<7) | (lpw[1]>>1);
-	k[2] = ((lpw[1]&0x03)<<6) | (lpw[2]>>2);
-	k[3] = ((lpw[2]&0x07)<<5) | (lpw[3]>>3);
-	k[4] = ((lpw[3]&0x0F)<<4) | (lpw[4]>>4);
-	k[5] = ((lpw[4]&0x1F)<<3) | (lpw[5]>>5);
-	k[6] = ((lpw[5]&0x3F)<<2) | (lpw[6]>>6);
-	k[7] = ((lpw[6]&0x7F)<<1);
-
-#ifdef HAVE_OPENSSL
-	des_set_odd_parity( key );
-#endif
-}
-
 #define MAX_PWLEN 256
 #define	HASHLEN	16
 
@@ -136,55 +112,6 @@ static void hexify(
 		*a++ = hex[*b++ & 0x0f];
 	}
 	*a++ = '\0';
-}
-
-static void lmhash(
-	struct berval *passwd,
-	struct berval *hash)
-{
-	char UcasePassword[15];
-	DES_cblock key;
-	DES_cblock StdText = "KGS!@#$%";
-	DES_cblock hbuf[2];
-#ifdef HAVE_OPENSSL
-	DES_key_schedule schedule;
-#elif defined(HAVE_GNUTLS)
-	gcry_cipher_hd_t h = NULL;
-	gcry_error_t err;
-
-	err = gcry_cipher_open( &h, GCRY_CIPHER_DES, GCRY_CIPHER_MODE_CBC, 0 );
-	if ( err ) return;
-#endif
-
-	strncpy( UcasePassword, passwd->bv_val, 14 );
-	UcasePassword[14] = '\0';
-	ldap_pvt_str2upper( UcasePassword );
-
-	lmPasswd_to_key( UcasePassword, &key );
-#ifdef HAVE_GNUTLS
-	err = gcry_cipher_setkey( h, &key, sizeof(key) );
-	if ( err == 0 ) {
-		err = gcry_cipher_encrypt( h, &hbuf[0], sizeof(key), &StdText, sizeof(key) );
-		if ( err == 0 ) {
-			gcry_cipher_reset( h );
-			lmPasswd_to_key( &UcasePassword[7], &key );
-			err = gcry_cipher_setkey( h, &key, sizeof(key) );
-			if ( err == 0 ) {
-				err = gcry_cipher_encrypt( h, &hbuf[1], sizeof(key), &StdText, sizeof(key) );
-			}
-		}
-		gcry_cipher_close( h );
-	}
-#elif defined(HAVE_OPENSSL)
-	des_set_key_unchecked( &key, schedule );
-	des_ecb_encrypt( &StdText, &hbuf[0], schedule , DES_ENCRYPT );
-
-	lmPasswd_to_key( &UcasePassword[7], &key );
-	des_set_key_unchecked( &key, schedule );
-	des_ecb_encrypt( &StdText, &hbuf[1], schedule , DES_ENCRYPT );
-#endif
-
-	hexify( (char *)hbuf, hash );
 }
 
 static void nthash(
@@ -221,10 +148,12 @@ lookup_admin_princstr(
 {
 	char fqdn[NI_MAXHOST] = "";
 	char hostname[HOST_NAME_MAX+1];
-	struct addrinfo *host_addr;
+	struct addrinfo *host_addr = NULL;
 	int rc;
 
 	rc = -1;
+
+#ifdef SMBKRB5PWD_KADM5_CLNT
 	if (gethostname(hostname, HOST_NAME_MAX+1)     ||
 	    getaddrinfo(hostname, NULL, NULL, &host_addr)) {
 		Log0(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
@@ -245,16 +174,31 @@ lookup_admin_princstr(
 			       + strlen(fqdn)
 			       + sizeof("@")
 			       + strlen(kerberos_realm) + 1;
+#endif
+
+#ifdef SMBKRB5PWD_KADM5_SRV
+	size_t princstr_size = strlen("root/admin@") + strlen(kerberos_realm) + 1;
+#endif
+
 	if (*admin_princstr)
 		free(*admin_princstr);
-	if ((*admin_princstr = malloc(princstr_size)) == NULL)
+
+	if ((*admin_princstr = calloc(princstr_size, 1)) == NULL)
 		goto error_with_host_addr;
+
+#ifdef SMBKRB5PWD_KADM5_CLNT
 	snprintf(*admin_princstr, princstr_size, "smbkrb5pwd/%s@%s", fqdn,
 		 kerberos_realm);
+#endif
+#ifdef SMBKRB5PWD_KADM5_SRV
+	snprintf(*admin_princstr, princstr_size, "root/admin@%s", kerberos_realm);
+#endif
+
 	rc = 0;
 
 error_with_host_addr:
-	freeaddrinfo(host_addr);
+	if (host_addr)
+		freeaddrinfo(host_addr);
 error:
 	return rc;
 }
@@ -271,7 +215,7 @@ static int krb5_set_passwd(
 	kadm5_ret_t retval;
 	krb5_context context;
 	Attribute *a_objectclass, *a_uid;
-	char *user_uid, *user_password, *user_princstr;
+	char *user_uid = NULL, *user_password = NULL, *user_princstr = NULL;
 	int rc;
 	size_t user_princstr_size;
 
@@ -316,8 +260,11 @@ static int krb5_set_passwd(
 		goto mitkrb_error_with_mutex_lock;
 	}
 
-	user_uid = a_uid->a_vals[0].bv_val;
-	user_password = qpw->rs_new.bv_val;
+	user_uid = calloc(a_uid->a_vals[0].bv_len + 1, 1);
+        user_password = calloc(qpw->rs_new.bv_len + 1, 1);
+
+        memcpy(user_uid, a_uid->a_vals[0].bv_val, a_uid->a_vals[0].bv_len);
+        memcpy(user_password, qpw->rs_new.bv_val, qpw->rs_new.bv_len);
 
 	retval = kadm5_init_krb5_context(&context);
 	if (retval) {
@@ -331,24 +278,37 @@ static int krb5_set_passwd(
 
 	params.mask |= KADM5_CONFIG_REALM;
 	params.realm = pi->kerberos_realm;
-	retval = kadm5_init_with_skey(context, pi->admin_princstr, KRB5_KEYTAB,
-				      KADM5_ADMIN_SERVICE, &params,
-				      KADM5_STRUCT_VERSION,
-				      KADM5_API_VERSION_3, NULL,
-				      &kadm5_handle);
+
+#ifdef SMBKRB5PWD_KADM5_SRV
+	retval = kadm5_init_with_password(context, pi->admin_princstr, NULL,
+					  NULL, &params,
+					  KADM5_STRUCT_VERSION,
+					  KADM5_API_VERSION_3, NULL,
+					  &kadm5_handle);
+#endif
+
+#ifdef SMBKRB5PWD_KADM5_CLNT
+        retval = kadm5_init_with_skey(context, pi->admin_princstr, KRB5_KEYTAB,
+                                 KADM5_ADMIN_SERVICE, &params,
+                                 KADM5_STRUCT_VERSION,
+                                 KADM5_API_VERSION_3, NULL,
+                                 &kadm5_handle);
+#endif
+
 	if (retval) {
-		Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
-		      "smbkrb5pwd %s : kadm5_init_with_skey() failed"
-		      " for user %s: %s\n",
-		      op->o_log_prefix, user_uid, error_message(retval));
+		Log4(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+		      "smbkrb5pwd %s : kadm5_init_with_password() failed"
+		      " for user %s (%s): %s\n",
+  		      op->o_log_prefix, user_uid, pi->admin_princstr, error_message(retval));
 		rc = LDAP_CONNECT_ERROR;
 		goto mitkrb_error_with_context;
 	}
 
 	user_princstr_size = strlen(user_uid)
 			     + sizeof("@")
-			     + strlen(pi->kerberos_realm);
-	if ((user_princstr = malloc(user_princstr_size)) == NULL) {
+			     + strlen(pi->kerberos_realm)
+	                     + 1;
+	if ((user_princstr = calloc(user_princstr_size, 1)) == NULL) {
 		rc = LDAP_CONNECT_ERROR;
 		goto mitkrb_error_with_kadm5_handle;
 	}
@@ -412,6 +372,12 @@ mitkrb_error_with_context:
 mitkrb_error_with_mutex_lock:
 	ldap_pvt_thread_mutex_unlock(&pi->krb5_mutex);
 finish:
+	if (user_uid)
+	  free(user_uid);
+
+	if (user_password)
+	  free(user_password);
+
 	return rc;
 }
 
@@ -495,33 +461,6 @@ static int smbkrb5pwd_exop_passwd(
 		nthash( &pwd, keys );
 		
 		ml->sml_desc = ad_sambaNTPassword;
-		ml->sml_op = LDAP_MOD_REPLACE;
-#ifdef SLAP_MOD_INTERNAL
-		ml->sml_flags = SLAP_MOD_INTERNAL;
-#endif
-		ml->sml_numvals = 1;
-		ml->sml_values = keys;
-		ml->sml_nvalues = NULL;
-
-		/* Truncate UCS2 to 8-bit ASCII */
-		c = pwd.bv_val+1;
-		d = pwd.bv_val+2;
-		for (j=1; j<l; j++) {
-			*c++ = *d++;
-			d++;
-		}
-		pwd.bv_len /= 2;
-		pwd.bv_val[pwd.bv_len] = '\0';
-
-		ml = ch_malloc(sizeof(Modifications));
-		ml->sml_next = qpw->rs_mods;
-		qpw->rs_mods = ml;
-
-		keys = ch_malloc( 2 * sizeof(struct berval) );
-		BER_BVZERO( &keys[1] );
-		lmhash( &pwd, keys );
-		
-		ml->sml_desc = ad_sambaLMPassword;
 		ml->sml_op = LDAP_MOD_REPLACE;
 #ifdef SLAP_MOD_INTERNAL
 		ml->sml_flags = SLAP_MOD_INTERNAL;
@@ -836,7 +775,6 @@ smbkrb5pwd_modules_init( smbkrb5pwd_t *pi )
 		{ NULL }
 	},
 	samba_ad[] = {
-		{ "sambaLMPassword",		&ad_sambaLMPassword },
 		{ "sambaNTPassword",		&ad_sambaNTPassword },
 		{ "sambaPwdLastSet",		&ad_sambaPwdLastSet },
 		{ "sambaPwdMustChange",		&ad_sambaPwdMustChange },
