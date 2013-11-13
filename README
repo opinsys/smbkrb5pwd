@@ -5,13 +5,23 @@ OVERVIEW
 
 smbkrb5pwd is an OpenLDAP (slapd) overlay to change LDAP, Samba and MIT 
 Kerberos passwords at the same time. It intercepts the LDAP 
-PasswordModify Extended Operations, changes LDAP attributes for LDAP and 
-Samba authentication and connects to kadmind to change the kerberos 
-password. It is similar to smbk5pwd overlay for Heimdal kerberos, but 
-smbkrb5pwd does not change kerberos attributes itself, but connects to 
-kadmind instead. Thus smbkrb5pwd needs a kerberos principal to connect 
-to kadmind to manage the user principals. MIT Kerberos can use LDAP 
-backend to store its data, but it should not be necessary.
+PasswordModify Extended Operations and changes all the passwords. It is 
+based on the smbk5pwd overlay that provides similar functionality for 
+Heimdal kerberos.
+
+The makefile creates two different versions of the overlay - smbkrb5pwd 
+and smbkrb5pwd_srv. smbkrb5pwd is linked against libkadm5clnt_mit and it 
+contacts kadmind to modify the kerberos principal. This was previously 
+the only operation mode available. When using kadmind to modify the 
+principals, smbkrb5pwd needs a kerberos principal to manage the user 
+principals. MIT Kerberos can use LDAP backend to store its data, but it 
+should not be necessary.
+
+smbkrb5pwd_srv uses libkadm5srv_mit to modify the kerberos principal and 
+it requires that the slapd is able to read all kerberos configuration 
+files including the kerberos stash files and ldap secrets. All file 
+operations are done within the slapd process so there may be security 
+considerations.
 
 When LDAP password is changed, the overlay checks whether a principal 
 uid@REALM exists and creates it if it does not. If the principal exists, 
@@ -48,6 +58,8 @@ SLAPD CONFIGURATION
 To configure the overlay, the module needs to be loaded and configured 
 for the database.
 
+Depending on the version to be loaded, the module name needs to be 
+changed. The older version that contacts kadmind:
 
 dn: cn=module{0},cn=config
 objectClass: olcModuleList
@@ -55,6 +67,17 @@ cn: module
 olcModulepath: /usr/lib/ldap
 olcModuleload: {0}back_hdb
 olcModuleload: {1}smbkrb5pwd
+
+The new mode that does not use kadmind:
+
+dn: cn=module{0},cn=config
+objectClass: olcModuleList
+cn: module
+olcModulepath: /usr/lib/ldap
+olcModuleload: {0}back_hdb
+olcModuleload: {1}smbkrb5pwd_srv
+
+Overlay configuration is the same for both:
 
 dn: olcOverlay={0}smbkrb5pwd,olcDatabase={1}hdb,cn=config
 objectClass: olcOverlayConfig
@@ -105,6 +128,16 @@ kadmin.local -q "ktadd -e des-cbc-crc:normal -k /etc/ldap/slapd.d/openldap-krb5.
 chown openldap.openldap /etc/ldap/slapd.d/openldap-krb5.keytab
 
 
+SMBKRB5PWD_SRV FILE PERMISSIONS
+
+smbkrb5pwd_srv needs read access to all kerberos configuration files (no 
+write access is needed). On Debian/Ubuntu these files are:
+
+/etc/krb5.conf
+/etc/krb5.secrets
+/etc/krb5kdc/*
+
+
 TESTING
 
 The overlay activates itself when an password change exop request is 
@@ -127,7 +160,7 @@ License that is also used for smbk5pwd.
 
 Copyright 2004-2010 The OpenLDAP Foundation.
 Portions Copyright 2004-2005 Howard Chu, Symas Corp. All rights reserved.
-Portions Copyright 2010 Opinsys Oy.
+Portions Copyright 2010-2013 Opinsys Oy.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted only as authorized by the OpenLDAP
