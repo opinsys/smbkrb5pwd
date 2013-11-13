@@ -44,6 +44,7 @@ libdir=$(prefix)/lib
 libexecdir=$(prefix)/libexec
 moduledir=$(libexecdir)$(ldap_subdir)
 
+.PHONY: all
 all:	smbkrb5pwd.la smbkrb5pwd_srv.la
 
 smbkrb5pwd.lo:	smbkrb5pwd.c
@@ -60,9 +61,11 @@ smbkrb5pwd_srv.la:	smbkrb5pwd_srv.lo
 	$(LIBTOOL) --mode=link $(CC)  $(MIT_KRB5_SRV_LIB) $(OPT) -version-info 0:0:0 \
 	-rpath $(moduledir) -module -o $@ $? $(LIBS) $(MIT_KRB5_SRV_LIB)
 
+.PHONY: clean
 clean:
 	rm -f smbkrb5pwd.lo smbkrb5pwd.la smbkrb5pwd_srv.lo smbkrb5pwd_srv.la
 
+.PHONY: install
 install: smbkrb5pwd.la
 	mkdir -p $(DESTDIR)$(moduledir)
 	$(LIBTOOL) --mode=install cp smbkrb5pwd.la $(DESTDIR)$(moduledir)
