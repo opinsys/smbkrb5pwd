@@ -79,6 +79,8 @@ typedef struct smbkrb5pwd_t {
 	char    *admin_princstr;
 	ldap_pvt_thread_mutex_t krb5_mutex;
 	ObjectClass *oc_requiredObjectclass;
+	void *kadm5_handle;
+	krb5_context *krb5_context;
 } smbkrb5pwd_t;
 
 static const unsigned SMBKRB5PWD_F_ALL	=
@@ -209,40 +211,29 @@ static int krb5_set_passwd(
 	Entry *e,
 	smbkrb5pwd_t *pi)
 {
-	void *kadm5_handle;
-	kadm5_config_params params;
 	kadm5_principal_ent_rec princ;
+	krb5_principal existing_princ;
 	kadm5_ret_t retval;
-	krb5_context context;
+//	krb5_context context;
 	Attribute *a_objectclass, *a_uid;
 	char *user_uid = NULL, *user_password = NULL, *user_princstr = NULL;
 	int rc;
 	size_t user_princstr_size;
 
+	rc = LDAP_LOCAL_ERROR;
+
 	if (!access_allowed(op, e, slap_schema.si_ad_userPassword, NULL,
 			    ACL_WRITE, NULL))
 		return LDAP_INSUFFICIENT_ACCESS;
 
-	rc = LDAP_LOCAL_ERROR;
+	if (init_krb(pi))
+		goto finish;
 
-	if (ldap_pvt_thread_mutex_trylock(&pi->krb5_mutex)) {
-		/* this should happen only very rarely,
-		 * we want to track these */
-		Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
-	     	     "smbkrb5pwd %s : lock contention on kerberos mutex\n",
-	     	     op->o_log_prefix);
-		if (ldap_pvt_thread_mutex_lock(&pi->krb5_mutex)) {
-			Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
-			     "smbkrb5pwd %s : failed to grab kerberos mutex\n",
-			     op->o_log_prefix);
-			rc = LDAP_CONNECT_ERROR;
-			goto finish;
-		}
-	}
+//	kadm5_lock(pi->kadm5_handle);
 
-	kadm5_handle = NULL;
+//	kadm5_handle = NULL;
 	memset(&princ, 0, sizeof(princ));
-	memset(&params, 0, sizeof(params));
+	memset(&existing_princ, 0, sizeof(existing_princ));
 	princ.principal = NULL;
 
 	/* Find the uid of the user - this is used to generate the kerberos
@@ -257,7 +248,7 @@ static int krb5_set_passwd(
 		      op->o_log_prefix,
 		      ldap_err2string(LDAP_NO_SUCH_ATTRIBUTE));
 		rc = LDAP_NO_SUCH_ATTRIBUTE;
-		goto mitkrb_error_with_mutex_lock;
+		goto finish;
 	}
 
 	user_uid = calloc(a_uid->a_vals[0].bv_len + 1, 1);
@@ -266,112 +257,84 @@ static int krb5_set_passwd(
         memcpy(user_uid, a_uid->a_vals[0].bv_val, a_uid->a_vals[0].bv_len);
         memcpy(user_password, qpw->rs_new.bv_val, qpw->rs_new.bv_len);
 
-	retval = kadm5_init_krb5_context(&context);
-	if (retval) {
-		Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
-		     "smbkrb5pwd %s : kadm5_init_krb5_context() failed"
-		     " for user %s: %s\n",
-		     op->o_log_prefix, user_uid, error_message(retval));
-		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_mutex_lock;
-	}
-
-	params.mask |= KADM5_CONFIG_REALM;
-	params.realm = pi->kerberos_realm;
-
-#ifdef SMBKRB5PWD_KADM5_SRV
-	retval = kadm5_init_with_password(context, pi->admin_princstr, NULL,
-					  NULL, &params,
-					  KADM5_STRUCT_VERSION,
-					  KADM5_API_VERSION_3, NULL,
-					  &kadm5_handle);
-#endif
-
-#ifdef SMBKRB5PWD_KADM5_CLNT
-        retval = kadm5_init_with_skey(context, pi->admin_princstr, KRB5_KEYTAB,
-                                 KADM5_ADMIN_SERVICE, &params,
-                                 KADM5_STRUCT_VERSION,
-                                 KADM5_API_VERSION_3, NULL,
-                                 &kadm5_handle);
-#endif
-
-	if (retval) {
-		Log4(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
-		      "smbkrb5pwd %s : kadm5_init_with_password() failed"
-		      " for user %s (%s): %s\n",
-  		      op->o_log_prefix, user_uid, pi->admin_princstr, error_message(retval));
-		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_context;
-	}
-
 	user_princstr_size = strlen(user_uid)
 			     + sizeof("@")
 			     + strlen(pi->kerberos_realm)
 	                     + 1;
 	if ((user_princstr = calloc(user_princstr_size, 1)) == NULL) {
 		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_kadm5_handle;
+		goto finish;
 	}
 	snprintf(user_princstr, user_princstr_size, "%s@%s", user_uid,
 		 pi->kerberos_realm);
 
-	retval = krb5_parse_name(context, user_princstr, &princ.principal);
+	retval = krb5_parse_name(*pi->krb5_context, user_princstr, &existing_princ);
 	if (retval) {
 		Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
 		     "smbkrb5pwd %s : krb5_parse_name() failed"
 		     " for user %s: %s\n",
 		     op->o_log_prefix, user_princstr, error_message(retval));
 		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_user_princstr;
+		goto finish;
 	}
 
-	long create_mask = KADM5_PRINCIPAL|KADM5_MAX_LIFE|KADM5_ATTRIBUTES;
-	princ.attributes |= KRB5_KDB_REQUIRES_PRE_AUTH;
-	retval = kadm5_create_principal(kadm5_handle, &princ, create_mask,
-					user_password);
+	retval = kadm5_get_principal(pi->kadm5_handle, existing_princ, &princ, KADM5_PRINCIPAL_NORMAL_MASK);
+
+	// TODO: What should be done to existing_princ and princ?
+
 	if (retval == KADM5_OK) {
-		Log2(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
-		     "smbkrb5pwd %s : created principal for user %s\n",
-		     op->o_log_prefix, user_princstr);
-		rc = LDAP_SUCCESS;
-	} else if (retval == KADM5_DUP) {
 		/* principal exists, only change password */
-		retval = kadm5_chpass_principal(kadm5_handle, princ.principal,
+		retval = kadm5_chpass_principal(pi->kadm5_handle, princ.principal,
 						user_password);
 		if (retval) {
+			kadm5_free_principal_ent(pi->kadm5_handle, &princ);
+
 			Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
 			     "smbkrb5pwd %s : kadm5_chpass_principal() failed "
 			     "for user %s: %s\n",
 			     op->o_log_prefix, user_princstr,
 			     error_message(retval));
 			rc = LDAP_CONNECT_ERROR;
-			goto mitkrb_error_with_princ;
+			goto finish;
 		} else {
+			kadm5_free_principal_ent(pi->kadm5_handle, &princ);
+
 			Log2(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
 			     "smbkrb5pwd %s : changed password for user %s\n",
 			     op->o_log_prefix, user_princstr);
 			rc = LDAP_SUCCESS;
 		}
 	} else {
-		Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
-		     "smbkrb5pwd %s : Problem creating principal for user %s: "
-		     "%s\n", op->o_log_prefix, user_princstr,
-		     error_message(retval));
-		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_princ;
+
+		retval = krb5_parse_name(*pi->krb5_context, user_princstr, &princ.principal);
+		long create_mask = KADM5_PRINCIPAL|KADM5_MAX_LIFE|KADM5_ATTRIBUTES;
+		princ.attributes |= KRB5_KDB_REQUIRES_PRE_AUTH;
+
+		retval = kadm5_create_principal(pi->kadm5_handle, &princ, create_mask,
+						user_password);
+
+		if (retval == KADM5_OK) {
+			Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
+			     "smbkrb5pwd %s : Created principal for user %s: "
+			     "%s\n", op->o_log_prefix, user_princstr,
+			     error_message(retval));
+
+			rc = LDAP_SUCCESS;
+		} else {
+			Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+			     "smbkrb5pwd %s : Problem creating principal for user %s: "
+			     "%s\n", op->o_log_prefix, user_princstr,
+			     error_message(retval));
+			rc = LDAP_CONNECT_ERROR;
+		}
+
+		krb5_free_principal(*pi->krb5_context, existing_princ);
 	}
 
-mitkrb_error_with_princ:
-	krb5_free_principal(context, princ.principal);
-mitkrb_error_with_kadm5_handle:
-	kadm5_destroy(kadm5_handle);
-mitkrb_error_with_user_princstr:
-	free(user_princstr);
-mitkrb_error_with_context:
-	krb5_free_context(context);
-mitkrb_error_with_mutex_lock:
-	ldap_pvt_thread_mutex_unlock(&pi->krb5_mutex);
 finish:
+	if (user_princstr)
+		free(user_princstr);
+
 	if (user_uid)
 	  free(user_uid);
 
@@ -392,10 +355,43 @@ static int smbkrb5pwd_exop_passwd(
 	slap_overinst *on = (slap_overinst *)op->o_bd->bd_info;
 	smbkrb5pwd_t *pi = on->on_bi.bi_private;
 	char term;
+        struct timespec *wait;
+	int counter = 0;
+	int mutex = 0;
 
 	/* Not the operation we expected, pass it on... */
 	if ( ber_bvcmp( &slap_EXOP_MODIFY_PASSWD, &op->ore_reqoid ) ) {
 		return SLAP_CB_CONTINUE;
+	}
+
+	/* Try to grab mutex before doing anything else */
+	if (ldap_pvt_thread_mutex_trylock(&pi->krb5_mutex)) {
+		/* this should happen only very rarely,
+		 * we want to track these */
+		Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
+	     	     "smbkrb5pwd %s : lock contention on kerberos mutex\n",
+	     	     op->o_log_prefix);
+//			rc = LDAP_CONNECT_ERROR;
+//			goto finish2;
+
+	        wait=(struct timespec *)(calloc(sizeof(struct timespec), 1));
+	        clock_gettime(CLOCK_REALTIME, wait);
+	        wait->tv_sec += 60;
+	        wait->tv_nsec = 0;
+
+		if (pthread_mutex_timedlock(&pi->krb5_mutex, wait)) {
+			Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
+			     "smbkrb5pwd %s : failed to grab kerberos mutex\n",
+			     op->o_log_prefix);
+			rc = LDAP_CONNECT_ERROR;
+			goto finish2;
+		} else {
+			Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
+			     "smbkrb5pwd %s : lock contention on kerberos mutex cleared\n",
+			     op->o_log_prefix);
+
+			sleep(1);
+		}
 	}
 
 	op->o_bd->bd_info = (BackendInfo *)on->on_info;
@@ -406,6 +402,7 @@ static int smbkrb5pwd_exop_passwd(
 	qpw->rs_new.bv_val[qpw->rs_new.bv_len] = '\0';
 
 	rc = SLAP_CB_CONTINUE;
+
 	if (pi->oc_requiredObjectclass &&
 	    !is_entry_objectclass(e, pi->oc_requiredObjectclass, 0)) {
 		Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
@@ -537,9 +534,13 @@ static int smbkrb5pwd_exop_passwd(
 			ml->sml_nvalues = NULL;
 		}
 	}
+
 finish:
 	be_entry_release_r( op, e );
 	qpw->rs_new.bv_val[qpw->rs_new.bv_len] = term;
+
+	ldap_pvt_thread_mutex_unlock(&pi->krb5_mutex);
+finish2:
 
 	return rc;
 }
@@ -760,6 +761,7 @@ smbkrb5pwd_cf_func( ConfigArgs *c )
 		assert( 0 );
 		return 1;
 	}
+
 	return rc;
 }
 
@@ -833,6 +835,57 @@ smbkrb5pwd_modules_init( smbkrb5pwd_t *pi )
 	return 0;
 }
 
+int init_krb(smbkrb5pwd_t *pi)
+{
+        kadm5_ret_t retval=KADM5_OK;
+	kadm5_config_params params;
+
+	if (!pi->krb5_context) {
+		pi->krb5_context = malloc(sizeof(pi->krb5_context));
+		retval = kadm5_init_krb5_context(pi->krb5_context);
+		if (retval) {
+			Log2(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+			     "smbkrb5pwd : kadm5_init_krb5_context() failed"
+			     " for realm %s: %s\n",
+			     pi->kerberos_realm, error_message(retval));
+			goto finish;
+		}
+	}
+
+	if (!pi->kadm5_handle) {
+		memset(&params, 0, sizeof(params));
+
+		params.mask |= KADM5_CONFIG_REALM;
+		params.realm = pi->kerberos_realm;
+
+#ifdef SMBKRB5PWD_KADM5_SRV
+		retval = kadm5_init_with_password(*pi->krb5_context, pi->admin_princstr, NULL,
+						  NULL, &params,
+						  KADM5_STRUCT_VERSION,
+						  KADM5_API_VERSION_3, NULL,
+						  &pi->kadm5_handle);
+#endif
+
+#ifdef SMBKRB5PWD_KADM5_CLNT
+	        retval = kadm5_init_with_skey(*pi->krb5_context, pi->admin_princstr, KRB5_KEYTAB,
+        	                         KADM5_ADMIN_SERVICE, &params,
+                	                 KADM5_STRUCT_VERSION,
+                        	         KADM5_API_VERSION_3, NULL,
+                                	 &pi->kadm5_handle);
+#endif
+
+		if (retval) {
+			Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+			      "smbkrb5pwd : kadm5_init_with_password() failed"
+			      " for realm %s: %s\n",
+	  		      pi->kerberos_realm, pi->admin_princstr, error_message(retval));
+		}
+	}
+
+finish:
+	return retval;
+}
+
 static int
 smbkrb5pwd_db_init(BackendDB *be, ConfigReply *cr)
 {
@@ -846,6 +899,8 @@ smbkrb5pwd_db_init(BackendDB *be, ConfigReply *cr)
 	pi->admin_princstr = NULL;
 	pi->kerberos_realm = NULL;
 	pi->oc_requiredObjectclass = NULL;
+	pi->kadm5_handle = NULL;
+	pi->krb5_context = NULL;
 	ldap_pvt_thread_mutex_init(&pi->krb5_mutex);
 
 	on->on_bi.bi_private = (void *)pi;
@@ -880,6 +935,13 @@ smbkrb5pwd_db_destroy(BackendDB *be, ConfigReply *cr)
 	smbkrb5pwd_t	*pi = (smbkrb5pwd_t *)on->on_bi.bi_private;
 
 	if ( pi ) {
+		if (pi->kadm5_handle)
+			kadm5_destroy(pi->kadm5_handle);
+		if (pi->krb5_context) {
+			krb5_free_context(*pi->krb5_context);
+			free(pi->krb5_context);
+		}
+
 		ch_free( pi );
 	}
 

@@ -12,8 +12,11 @@
 # top-level directory of the distribution or, alternatively, at
 # <http://www.OpenLDAP.org/license.html>.
 
-LDAP_SRC=../../..
-LDAP_BUILD=$(LDAP_SRC)
+LDAP_SRC=/home/opinsys/vm/openldap-2.4.37
+LDAP_BUILD=$(LDAP_SRC)/debian/build
+
+#LDAP_SRC=../../..
+#LDAP_BUILD=$(LDAP_SRC)
 LDAP_INC=-I$(LDAP_BUILD)/include -I$(LDAP_SRC)/include -I$(LDAP_SRC)/servers/slapd
 LDAP_LIB=$(LDAP_BUILD)/libraries/libldap_r/libldap_r.la \
 	$(LDAP_BUILD)/libraries/liblber/liblber.la
@@ -32,7 +35,7 @@ MIT_KRB5_LIB=-L/usr/lib/$(shell gcc -print-multiarch)/mit-krb5 -lkrb5
 
 DEFS=
 INCS=$(LDAP_INC) $(MIT_KRB5_INC) $(SSL_INC)
-LIBS=$(LDAP_LIB) $(MIT_KRB5_LIB) $(SSL_LIB)
+LIBS=$(LDAP_LIB) $(MIT_KRB5_LIB) $(SSL_LIB) -lrt -lpthread
 
 MIT_KRB5_SRV_LIB=-lkadm5srv_mit
 MIT_KRB5_CLNT_LIB=-lkadm5clnt_mit
