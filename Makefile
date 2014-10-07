@@ -15,8 +15,6 @@
 LDAP_SRC=../../..
 LDAP_BUILD=$(LDAP_SRC)
 LDAP_INC=-I$(LDAP_BUILD)/include -I$(LDAP_SRC)/include -I$(LDAP_SRC)/servers/slapd
-LDAP_LIB=$(LDAP_BUILD)/libraries/libldap_r/libldap_r.la \
-	$(LDAP_BUILD)/libraries/liblber/liblber.la
 
 SSL_INC=
 SSL_LIB=-lcrypto
@@ -32,7 +30,7 @@ MIT_KRB5_LIB=-L/usr/lib/$(shell gcc -print-multiarch)/mit-krb5 -lkrb5
 
 DEFS=
 INCS=$(LDAP_INC) $(MIT_KRB5_INC) $(SSL_INC)
-LIBS=$(LDAP_LIB) $(MIT_KRB5_LIB) $(SSL_LIB)
+LIBS=$(MIT_KRB5_LIB) $(SSL_LIB)
 
 MIT_KRB5_SRV_LIB=-lkadm5srv_mit
 MIT_KRB5_CLNT_LIB=-lkadm5clnt_mit
