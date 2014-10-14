@@ -79,6 +79,8 @@ typedef struct smbkrb5pwd_t {
 	char    *admin_princstr;
 	ldap_pvt_thread_mutex_t krb5_mutex;
 	ObjectClass *oc_requiredObjectclass;
+	void *kadm5_handle;
+	krb5_context *krb5_context;
 } smbkrb5pwd_t;
 
 static const unsigned SMBKRB5PWD_F_ALL	=
@@ -846,6 +848,8 @@ smbkrb5pwd_db_init(BackendDB *be, ConfigReply *cr)
 	pi->admin_princstr = NULL;
 	pi->kerberos_realm = NULL;
 	pi->oc_requiredObjectclass = NULL;
+	pi->kadm5_handle = NULL;
+	pi->krb5_context = NULL;
 	ldap_pvt_thread_mutex_init(&pi->krb5_mutex);
 
 	on->on_bi.bi_private = (void *)pi;
@@ -907,6 +911,82 @@ smbkrb5pwd_initialize(void)
 	}
 
 	return overlay_register( &smbkrb5pwd );
+}
+
+/*
+  Initialise krb5_context either with kadm5_init_with_password or 
+  kadm5_init_with_skey depending on whether the module is compiled 
+  using kadm5_srv or kadm5_clnt.
+
+  Returns KADM5_OK if pi->krb5_context is already initialised or it 
+  was initialised successfully.
+*/
+int init_krb5(smbkrb5pwd_t *pi)
+{
+	kadm5_ret_t retval=KADM5_FAILURE;
+	kadm5_config_params params;
+
+	if (pi->krb5_context)
+		return KADM5_OK;
+
+	pi->krb5_context = malloc(sizeof(pi->krb5_context));
+
+	if (!pi->krb5_context)
+		return KADM5_OK;
+
+	retval = kadm5_init_krb5_context(pi->krb5_context);
+	if (retval) {
+		Log2(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+			"smbkrb5pwd : kadm5_init_krb5_context() failed"
+			" for realm %s: %s\n",
+			pi->kerberos_realm, error_message(retval));
+		goto err;
+	}
+
+	memset(&params, 0, sizeof(params));
+
+	params.mask |= KADM5_CONFIG_REALM;
+	params.realm = pi->kerberos_realm;
+
+#ifdef SMBKRB5PWD_KADM5_SRV
+	retval = kadm5_init_with_password(*pi->krb5_context, pi->admin_princstr, NULL,
+		NULL, &params,
+		KADM5_STRUCT_VERSION,
+		KADM5_API_VERSION_3, NULL,
+		&pi->kadm5_handle);
+#endif
+
+#ifdef SMBKRB5PWD_KADM5_CLNT
+	retval = kadm5_init_with_skey(*pi->krb5_context, pi->admin_princstr, KRB5_KEYTAB,
+		KADM5_ADMIN_SERVICE, &params,
+		KADM5_STRUCT_VERSION,
+		KADM5_API_VERSION_3, NULL,
+		&pi->kadm5_handle);
+#endif
+
+	if (retval) {
+		Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+		"smbkrb5pwd : kadm5_init_with_password() failed"
+		" for realm %s: %s\n",
+		pi->kerberos_realm, pi->admin_princstr, error_message(retval));
+
+		goto err;
+	}
+
+	return retval;
+
+err:
+	if (!pi->krb5_context) {
+		free(!pi->krb5_context);
+		pi->krb5_context = NULL;
+	}
+
+	if (!pi->kadm5_handle) {
+		kadm5_destroy(pi->kadm5_handle);
+		pi->kadm5_handle = NULL;
+	}
+
+	return retval;
 }
 
 #if SLAPD_OVER_SMBKRB5PWD == SLAPD_MOD_DYNAMIC
