@@ -924,7 +924,7 @@ int init_krb5(smbkrb5pwd_t *pi)
 	pi->krb5_context = malloc(sizeof(pi->krb5_context));
 
 	if (!pi->krb5_context)
-		return KADM5_OK;
+		return KADM5_FAILURE;
 
 	retval = kadm5_init_krb5_context(pi->krb5_context);
 	if (retval) {
