@@ -211,11 +211,9 @@ static int krb5_set_passwd(
 	Entry *e,
 	smbkrb5pwd_t *pi)
 {
-	void *kadm5_handle;
-	kadm5_config_params params;
 	kadm5_principal_ent_rec princ;
+	krb5_principal existing_princ;
 	kadm5_ret_t retval;
-	krb5_context context;
 	Attribute *a_objectclass, *a_uid;
 	char *user_uid = NULL, *user_password = NULL, *user_princstr = NULL;
 	int rc;
@@ -226,6 +224,9 @@ static int krb5_set_passwd(
 		return LDAP_INSUFFICIENT_ACCESS;
 
 	rc = LDAP_LOCAL_ERROR;
+
+	if (init_krb5(pi))
+		goto finish;
 
 	if (ldap_pvt_thread_mutex_trylock(&pi->krb5_mutex)) {
 		/* this should happen only very rarely,
@@ -242,9 +243,8 @@ static int krb5_set_passwd(
 		}
 	}
 
-	kadm5_handle = NULL;
 	memset(&princ, 0, sizeof(princ));
-	memset(&params, 0, sizeof(params));
+	memset(&existing_princ, 0, sizeof(existing_princ));
 	princ.principal = NULL;
 
 	/* Find the uid of the user - this is used to generate the kerberos
@@ -268,68 +268,30 @@ static int krb5_set_passwd(
         memcpy(user_uid, a_uid->a_vals[0].bv_val, a_uid->a_vals[0].bv_len);
         memcpy(user_password, qpw->rs_new.bv_val, qpw->rs_new.bv_len);
 
-	retval = kadm5_init_krb5_context(&context);
-	if (retval) {
-		Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
-		     "smbkrb5pwd %s : kadm5_init_krb5_context() failed"
-		     " for user %s: %s\n",
-		     op->o_log_prefix, user_uid, error_message(retval));
-		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_mutex_lock;
-	}
-
-	params.mask |= KADM5_CONFIG_REALM;
-	params.realm = pi->kerberos_realm;
-
-#ifdef SMBKRB5PWD_KADM5_SRV
-	retval = kadm5_init_with_password(context, pi->admin_princstr, NULL,
-					  NULL, &params,
-					  KADM5_STRUCT_VERSION,
-					  KADM5_API_VERSION_3, NULL,
-					  &kadm5_handle);
-#endif
-
-#ifdef SMBKRB5PWD_KADM5_CLNT
-        retval = kadm5_init_with_skey(context, pi->admin_princstr, KRB5_KEYTAB,
-                                 KADM5_ADMIN_SERVICE, &params,
-                                 KADM5_STRUCT_VERSION,
-                                 KADM5_API_VERSION_3, NULL,
-                                 &kadm5_handle);
-#endif
-
-	if (retval) {
-		Log4(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
-		      "smbkrb5pwd %s : kadm5_init_with_password() failed"
-		      " for user %s (%s): %s\n",
-  		      op->o_log_prefix, user_uid, pi->admin_princstr, error_message(retval));
-		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_context;
-	}
-
 	user_princstr_size = strlen(user_uid)
 			     + sizeof("@")
 			     + strlen(pi->kerberos_realm)
 	                     + 1;
 	if ((user_princstr = calloc(user_princstr_size, 1)) == NULL) {
 		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_kadm5_handle;
+		goto mitkrb_error_with_mutex_lock;
 	}
 	snprintf(user_princstr, user_princstr_size, "%s@%s", user_uid,
 		 pi->kerberos_realm);
 
-	retval = krb5_parse_name(context, user_princstr, &princ.principal);
+	retval = krb5_parse_name(pi->krb5_context, user_princstr, &princ.principal);
 	if (retval) {
 		Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
 		     "smbkrb5pwd %s : krb5_parse_name() failed"
 		     " for user %s: %s\n",
 		     op->o_log_prefix, user_princstr, error_message(retval));
 		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_user_princstr;
+		goto mitkrb_error_with_mutex_lock;
 	}
 
 	long create_mask = KADM5_PRINCIPAL|KADM5_MAX_LIFE|KADM5_ATTRIBUTES;
 	princ.attributes |= KRB5_KDB_REQUIRES_PRE_AUTH;
-	retval = kadm5_create_principal(kadm5_handle, &princ, create_mask,
+	retval = kadm5_create_principal(pi->kadm5_handle, &princ, create_mask,
 					user_password);
 	if (retval == KADM5_OK) {
 		Log2(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
@@ -338,7 +300,7 @@ static int krb5_set_passwd(
 		rc = LDAP_SUCCESS;
 	} else if (retval == KADM5_DUP) {
 		/* principal exists, only change password */
-		retval = kadm5_chpass_principal(kadm5_handle, princ.principal,
+		retval = kadm5_chpass_principal(pi->kadm5_handle, princ.principal,
 						user_password);
 		if (retval) {
 			Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
@@ -347,7 +309,7 @@ static int krb5_set_passwd(
 			     op->o_log_prefix, user_princstr,
 			     error_message(retval));
 			rc = LDAP_CONNECT_ERROR;
-			goto mitkrb_error_with_princ;
+			goto mitkrb_error_with_mutex_lock;
 		} else {
 			Log2(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
 			     "smbkrb5pwd %s : changed password for user %s\n",
@@ -360,20 +322,15 @@ static int krb5_set_passwd(
 		     "%s\n", op->o_log_prefix, user_princstr,
 		     error_message(retval));
 		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_princ;
+		goto mitkrb_error_with_mutex_lock;
 	}
 
-mitkrb_error_with_princ:
-	krb5_free_principal(context, princ.principal);
-mitkrb_error_with_kadm5_handle:
-	kadm5_destroy(kadm5_handle);
-mitkrb_error_with_user_princstr:
-	free(user_princstr);
-mitkrb_error_with_context:
-	krb5_free_context(context);
 mitkrb_error_with_mutex_lock:
 	ldap_pvt_thread_mutex_unlock(&pi->krb5_mutex);
 finish:
+	if (user_princstr)
+		free(user_princstr);
+
 	if (user_uid)
 	  free(user_uid);
 
