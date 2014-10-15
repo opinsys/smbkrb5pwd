@@ -370,12 +370,16 @@ static int smbkrb5pwd_exop_passwd(
 		wait->tv_nsec = 0;
 
 		if (pthread_mutex_timedlock(&pi->krb5_mutex, wait)) {
+			free(wait);
+
 			Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
 				"smbkrb5pwd %s : failed to grab kerberos mutex\n",
 				op->o_log_prefix);
 			rc = LDAP_CONNECT_ERROR;
 			goto finish2;
 		} else {
+			free(wait);
+
 			Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
 				"smbkrb5pwd %s : lock contention on kerberos mutex cleared\n",
 				op->o_log_prefix);
@@ -934,6 +938,10 @@ int init_krb5(smbkrb5pwd_t *pi)
 			"smbkrb5pwd : kadm5_init_krb5_context() failed"
 			" for realm %s: %s\n",
 			pi->kerberos_realm, error_message(retval));
+
+		free(pi->krb5_context);
+		pi->krb5_context = NULL;
+
 		goto err;
 	}
 
