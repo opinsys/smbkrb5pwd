@@ -323,6 +323,8 @@ finish:
 	if (existing_princ)
 		krb5_free_principal(*pi->krb5_context, existing_princ);
 
+	free_krb5(pi);
+
 	if (user_princstr)
 		free(user_princstr);
 
@@ -968,17 +970,23 @@ int init_krb5(smbkrb5pwd_t *pi)
 	return retval;
 
 err:
-	if (!pi->krb5_context) {
-		free(!pi->krb5_context);
-		pi->krb5_context = NULL;
-	}
+	free_krb5(pi);
 
-	if (!pi->kadm5_handle) {
+	return retval;
+}
+
+void free_krb5(smbkrb5pwd_t *pi)
+{
+	if (pi->kadm5_handle) {
 		kadm5_destroy(pi->kadm5_handle);
 		pi->kadm5_handle = NULL;
 	}
 
-	return retval;
+	if (pi->krb5_context) {
+		krb5_free_context(*pi->krb5_context);
+		free(pi->krb5_context);
+		pi->krb5_context = NULL;
+	}
 }
 
 #if SLAPD_OVER_SMBKRB5PWD == SLAPD_MOD_DYNAMIC
