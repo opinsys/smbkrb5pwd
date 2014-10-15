@@ -301,21 +301,33 @@ static int krb5_set_passwd(
 		// Create the principal if it didn't exist yet
 
 		retval = krb5_parse_name(*pi->krb5_context, user_princstr, &princ.principal);
-		long create_mask = KADM5_PRINCIPAL|KADM5_MAX_LIFE|KADM5_ATTRIBUTES;
-		princ.attributes |= KRB5_KDB_REQUIRES_PRE_AUTH;
-		retval = kadm5_create_principal(pi->kadm5_handle, &princ, create_mask,
-					user_password);
-		if (retval == KADM5_OK) {
-			Log2(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
-			     "smbkrb5pwd %s : created principal for user %s\n",
-			     op->o_log_prefix, user_princstr);
-			rc = LDAP_SUCCESS;
-		} else {
+
+		if (retval != KADM5_OK) {
 			Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
-			     "smbkrb5pwd %s : Problem creating principal for user %s: "
-			     "%s\n", op->o_log_prefix, user_princstr,
-			     error_message(retval));
+			     "smbkrb5pwd %s : krb5_parse_name() failed"
+			     " for user %s: %s\n",
+			     op->o_log_prefix, user_princstr, error_message(retval));
 			rc = LDAP_CONNECT_ERROR;
+		} else {
+			long create_mask = KADM5_PRINCIPAL|KADM5_MAX_LIFE|KADM5_ATTRIBUTES;
+			princ.attributes |= KRB5_KDB_REQUIRES_PRE_AUTH;
+			retval = kadm5_create_principal(pi->kadm5_handle, &princ, create_mask,
+					user_password);
+
+			if (retval == KADM5_OK) {
+				Log2(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
+				     "smbkrb5pwd %s : created principal for user %s\n",
+				     op->o_log_prefix, user_princstr);
+				rc = LDAP_SUCCESS;
+			} else {
+				Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+				     "smbkrb5pwd %s : Problem creating principal for user %s: "
+				     "%s\n", op->o_log_prefix, user_princstr,
+				     error_message(retval));
+				rc = LDAP_CONNECT_ERROR;
+			}
+
+			kadm5_free_principal_ent(pi->kadm5_handle, &princ);
 		}
 	}
 
