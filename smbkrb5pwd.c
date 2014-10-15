@@ -869,6 +869,13 @@ smbkrb5pwd_db_destroy(BackendDB *be, ConfigReply *cr)
 	smbkrb5pwd_t	*pi = (smbkrb5pwd_t *)on->on_bi.bi_private;
 
 	if ( pi ) {
+		if (pi->kadm5_handle)
+			kadm5_destroy(pi->kadm5_handle);
+		if (pi->krb5_context) {
+			krb5_free_context(*pi->krb5_context);
+			free(pi->krb5_context);
+		}
+
 		ch_free( pi );
 	}
 
