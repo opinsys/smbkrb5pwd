@@ -279,7 +279,9 @@ static int krb5_set_passwd(
 	snprintf(user_princstr, user_princstr_size, "%s@%s", user_uid,
 		 pi->kerberos_realm);
 
-	retval = krb5_parse_name(pi->krb5_context, user_princstr, &princ.principal);
+	// First check if the principal already exists by fetching it
+
+	retval = krb5_parse_name(*pi->krb5_context, user_princstr, &existing_princ);
 	if (retval) {
 		Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
 		     "smbkrb5pwd %s : krb5_parse_name() failed"
@@ -289,18 +291,11 @@ static int krb5_set_passwd(
 		goto mitkrb_error_with_mutex_lock;
 	}
 
-	long create_mask = KADM5_PRINCIPAL|KADM5_MAX_LIFE|KADM5_ATTRIBUTES;
-	princ.attributes |= KRB5_KDB_REQUIRES_PRE_AUTH;
-	retval = kadm5_create_principal(pi->kadm5_handle, &princ, create_mask,
-					user_password);
+	retval = kadm5_get_principal(pi->kadm5_handle, existing_princ, &princ, KADM5_PRINCIPAL_NORMAL_MASK);
+
 	if (retval == KADM5_OK) {
-		Log2(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
-		     "smbkrb5pwd %s : created principal for user %s\n",
-		     op->o_log_prefix, user_princstr);
-		rc = LDAP_SUCCESS;
-	} else if (retval == KADM5_DUP) {
 		/* principal exists, only change password */
-		retval = kadm5_chpass_principal(pi->kadm5_handle, princ.principal,
+		retval = kadm5_chpass_principal(pi->kadm5_handle, existing_princ,
 						user_password);
 		if (retval) {
 			Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
@@ -309,25 +304,42 @@ static int krb5_set_passwd(
 			     op->o_log_prefix, user_princstr,
 			     error_message(retval));
 			rc = LDAP_CONNECT_ERROR;
-			goto mitkrb_error_with_mutex_lock;
 		} else {
 			Log2(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
 			     "smbkrb5pwd %s : changed password for user %s\n",
 			     op->o_log_prefix, user_princstr);
 			rc = LDAP_SUCCESS;
 		}
+
+		kadm5_free_principal_ent(pi->kadm5_handle, &princ);
 	} else {
-		Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
-		     "smbkrb5pwd %s : Problem creating principal for user %s: "
-		     "%s\n", op->o_log_prefix, user_princstr,
-		     error_message(retval));
-		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_mutex_lock;
+		// Create the principal if it didn't exist yet
+
+		retval = krb5_parse_name(*pi->krb5_context, user_princstr, &princ.principal);
+		long create_mask = KADM5_PRINCIPAL|KADM5_MAX_LIFE|KADM5_ATTRIBUTES;
+		princ.attributes |= KRB5_KDB_REQUIRES_PRE_AUTH;
+		retval = kadm5_create_principal(pi->kadm5_handle, &princ, create_mask,
+					user_password);
+		if (retval == KADM5_OK) {
+			Log2(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
+			     "smbkrb5pwd %s : created principal for user %s\n",
+			     op->o_log_prefix, user_princstr);
+			rc = LDAP_SUCCESS;
+		} else {
+			Log3(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+			     "smbkrb5pwd %s : Problem creating principal for user %s: "
+			     "%s\n", op->o_log_prefix, user_princstr,
+			     error_message(retval));
+			rc = LDAP_CONNECT_ERROR;
+		}
 	}
 
 mitkrb_error_with_mutex_lock:
 	ldap_pvt_thread_mutex_unlock(&pi->krb5_mutex);
 finish:
+	if (existing_princ)
+		krb5_free_principal(*pi->krb5_context, existing_princ);
+
 	if (user_princstr)
 		free(user_princstr);
 
