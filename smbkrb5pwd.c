@@ -228,21 +228,6 @@ static int krb5_set_passwd(
 	if (init_krb5(pi))
 		goto finish;
 
-	if (ldap_pvt_thread_mutex_trylock(&pi->krb5_mutex)) {
-		/* this should happen only very rarely,
-		 * we want to track these */
-		Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
-	     	     "smbkrb5pwd %s : lock contention on kerberos mutex\n",
-	     	     op->o_log_prefix);
-		if (ldap_pvt_thread_mutex_lock(&pi->krb5_mutex)) {
-			Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
-			     "smbkrb5pwd %s : failed to grab kerberos mutex\n",
-			     op->o_log_prefix);
-			rc = LDAP_CONNECT_ERROR;
-			goto finish;
-		}
-	}
-
 	memset(&princ, 0, sizeof(princ));
 	memset(&existing_princ, 0, sizeof(existing_princ));
 	princ.principal = NULL;
@@ -259,7 +244,7 @@ static int krb5_set_passwd(
 		      op->o_log_prefix,
 		      ldap_err2string(LDAP_NO_SUCH_ATTRIBUTE));
 		rc = LDAP_NO_SUCH_ATTRIBUTE;
-		goto mitkrb_error_with_mutex_lock;
+		goto finish;
 	}
 
 	user_uid = calloc(a_uid->a_vals[0].bv_len + 1, 1);
@@ -274,7 +259,7 @@ static int krb5_set_passwd(
 	                     + 1;
 	if ((user_princstr = calloc(user_princstr_size, 1)) == NULL) {
 		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_mutex_lock;
+		goto finish;
 	}
 	snprintf(user_princstr, user_princstr_size, "%s@%s", user_uid,
 		 pi->kerberos_realm);
@@ -288,7 +273,7 @@ static int krb5_set_passwd(
 		     " for user %s: %s\n",
 		     op->o_log_prefix, user_princstr, error_message(retval));
 		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_mutex_lock;
+		goto finish;
 	}
 
 	retval = kadm5_get_principal(pi->kadm5_handle, existing_princ, &princ, KADM5_PRINCIPAL_NORMAL_MASK);
@@ -334,8 +319,6 @@ static int krb5_set_passwd(
 		}
 	}
 
-mitkrb_error_with_mutex_lock:
-	ldap_pvt_thread_mutex_unlock(&pi->krb5_mutex);
 finish:
 	if (existing_princ)
 		krb5_free_principal(*pi->krb5_context, existing_princ);
@@ -363,10 +346,41 @@ static int smbkrb5pwd_exop_passwd(
 	slap_overinst *on = (slap_overinst *)op->o_bd->bd_info;
 	smbkrb5pwd_t *pi = on->on_bi.bi_private;
 	char term;
+	struct timespec *wait;
 
 	/* Not the operation we expected, pass it on... */
 	if ( ber_bvcmp( &slap_EXOP_MODIFY_PASSWD, &op->ore_reqoid ) ) {
 		return SLAP_CB_CONTINUE;
+	}
+
+	/* Try to grab mutex before doing anything else */
+	if (ldap_pvt_thread_mutex_trylock(&pi->krb5_mutex)) {
+		/* this should happen only very rarely,
+		 * we want to track these */
+		Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
+	     	     "smbkrb5pwd %s : lock contention on kerberos mutex\n",
+	     	     op->o_log_prefix);
+
+		// Wait for mutex maximum of 60s before giving up
+		wait=(struct timespec *)(calloc(sizeof(struct timespec), 1));
+		clock_gettime(CLOCK_REALTIME, wait);
+		wait->tv_sec += 60;
+		wait->tv_nsec = 0;
+
+		if (pthread_mutex_timedlock(&pi->krb5_mutex, wait)) {
+			Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
+				"smbkrb5pwd %s : failed to grab kerberos mutex\n",
+				op->o_log_prefix);
+			rc = LDAP_CONNECT_ERROR;
+			goto finish2;
+		} else {
+			Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
+				"smbkrb5pwd %s : lock contention on kerberos mutex cleared\n",
+				op->o_log_prefix);
+
+				// There's still some race somewhere that is cleared by waiting 1s
+			sleep(1);
+		}
 	}
 
 	op->o_bd->bd_info = (BackendInfo *)on->on_info;
@@ -512,6 +526,8 @@ finish:
 	be_entry_release_r( op, e );
 	qpw->rs_new.bv_val[qpw->rs_new.bv_len] = term;
 
+	ldap_pvt_thread_mutex_unlock(&pi->krb5_mutex);
+finish2:
 	return rc;
 }
 
