@@ -30,7 +30,7 @@ MIT_KRB5_LIB=-L/usr/lib/$(shell gcc -print-multiarch)/mit-krb5 -lkrb5
 
 DEFS=
 INCS=$(LDAP_INC) $(MIT_KRB5_INC) $(SSL_INC)
-LIBS=$(MIT_KRB5_LIB) $(SSL_LIB)
+LIBS=$(MIT_KRB5_LIB) $(SSL_LIB) -lrt -lpthread
 
 MIT_KRB5_SRV_LIB=-lkadm5srv_mit
 MIT_KRB5_CLNT_LIB=-lkadm5clnt_mit
