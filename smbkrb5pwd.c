@@ -28,6 +28,7 @@
 #include <netdb.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
 
 #ifndef SLAPD_OVER_SMBKRB5PWD
 #define SLAPD_OVER_SMBKRB5PWD SLAPD_MOD_DYNAMIC
@@ -238,6 +239,36 @@ static int krb5_set_passwd(
 	*/
 
 	worker_pid = fork();
+
+	if (worker_pid == -1) {
+		switch (errno) {
+			case EAGAIN:
+				Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+				      "smbkrb5pwd %s : failed to fork process for password change (EAGAIN)!\n",
+				      op->o_log_prefix);
+
+				return LDAP_LOCAL_ERROR;
+			case ENOMEM:
+				Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+				      "smbkrb5pwd %s : failed to fork process for password change (ENOMEM - No memory)!\n",
+				      op->o_log_prefix);
+
+				return LDAP_LOCAL_ERROR;
+			case ENOSYS:
+				Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+				      "smbkrb5pwd %s : failed to fork process for password change (ENOSYS - Not supported)!\n",
+				      op->o_log_prefix);
+
+				return LDAP_LOCAL_ERROR;
+			default:
+				Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+				      "smbkrb5pwd %s : failed to fork process for password change!\n",
+				      op->o_log_prefix);
+
+				return LDAP_LOCAL_ERROR;
+		}
+	}
+
 	if (worker_pid) {
 		waitpid(worker_pid, &status, 0);
 
