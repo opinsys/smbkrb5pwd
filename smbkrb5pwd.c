@@ -243,7 +243,7 @@ static int krb5_set_passwd(
 
 		if (status == SIGALRM) {
 			Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
-			      "smbkrb5pwd %s : forked password change process did not complete in 2s\n",
+			      "smbkrb5pwd %s : forked password change process did not complete in 15s\n",
 			      op->o_log_prefix);
 
 			return LDAP_LOCAL_ERROR;
@@ -253,7 +253,7 @@ static int krb5_set_passwd(
 	}
 
 	signal(SIGALRM, SIG_DFL);
-	alarm(2);
+	alarm(15);
 
 	kadm5_handle = NULL;
 	memset(&princ, 0, sizeof(princ));
