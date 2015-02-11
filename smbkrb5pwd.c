@@ -28,6 +28,7 @@
 #include <netdb.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
 
 #ifndef SLAPD_OVER_SMBKRB5PWD
 #define SLAPD_OVER_SMBKRB5PWD SLAPD_MOD_DYNAMIC
@@ -218,6 +219,9 @@ static int krb5_set_passwd(
 	char *user_uid = NULL, *user_password = NULL, *user_princstr = NULL;
 	int rc;
 	size_t user_princstr_size;
+	pid_t worker_pid = 0;
+	pid_t timeout_pid = 0;
+	int status = 0;
 
 	if (!access_allowed(op, e, slap_schema.si_ad_userPassword, NULL,
 			    ACL_WRITE, NULL))
@@ -225,20 +229,62 @@ static int krb5_set_passwd(
 
 	rc = LDAP_LOCAL_ERROR;
 
-	if (ldap_pvt_thread_mutex_trylock(&pi->krb5_mutex)) {
-		/* this should happen only very rarely,
-		 * we want to track these */
-		Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
-	     	     "smbkrb5pwd %s : lock contention on kerberos mutex\n",
-	     	     op->o_log_prefix);
-		if (ldap_pvt_thread_mutex_lock(&pi->krb5_mutex)) {
-			Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
-			     "smbkrb5pwd %s : failed to grab kerberos mutex\n",
-			     op->o_log_prefix);
-			rc = LDAP_CONNECT_ERROR;
-			goto finish;
+	/* The krb5 kadm5 libraries seem to use global variables that hold the 
+           master key for the realm and some other realm specific data. Mutexes
+	   did not seem to get rid of all the problems related to this and 
+	   some lockups still happened, so fork the process instead before 
+	   doing any krb5 operations. The process is forked and the child sets 
+	   an alarm that kills the forked process if the password change is not 
+	   finished in 2 seconds.
+	*/
+
+	worker_pid = fork();
+
+	if (worker_pid == -1) {
+		switch (errno) {
+			case EAGAIN:
+				Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+				      "smbkrb5pwd %s : failed to fork process for password change (EAGAIN)!\n",
+				      op->o_log_prefix);
+
+				return LDAP_LOCAL_ERROR;
+			case ENOMEM:
+				Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+				      "smbkrb5pwd %s : failed to fork process for password change (ENOMEM - No memory)!\n",
+				      op->o_log_prefix);
+
+				return LDAP_LOCAL_ERROR;
+			case ENOSYS:
+				Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+				      "smbkrb5pwd %s : failed to fork process for password change (ENOSYS - Not supported)!\n",
+				      op->o_log_prefix);
+
+				return LDAP_LOCAL_ERROR;
+			default:
+				Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+				      "smbkrb5pwd %s : failed to fork process for password change!\n",
+				      op->o_log_prefix);
+
+				return LDAP_LOCAL_ERROR;
 		}
 	}
+
+	if (worker_pid) {
+		waitpid(worker_pid, &status, 0);
+
+		if (status == SIGALRM) {
+			Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_ERR,
+			      "smbkrb5pwd %s : forked password change process did not complete in 15s\n",
+			      op->o_log_prefix);
+
+			return LDAP_LOCAL_ERROR;
+		}
+
+		return status;
+	}
+
+	signal(SIGALRM, SIG_DFL);
+	alarm(15);
 
 	kadm5_handle = NULL;
 	memset(&princ, 0, sizeof(princ));
@@ -257,7 +303,7 @@ static int krb5_set_passwd(
 		      op->o_log_prefix,
 		      ldap_err2string(LDAP_NO_SUCH_ATTRIBUTE));
 		rc = LDAP_NO_SUCH_ATTRIBUTE;
-		goto mitkrb_error_with_mutex_lock;
+		goto finish;
 	}
 
 	user_uid = calloc(a_uid->a_vals[0].bv_len + 1, 1);
@@ -273,7 +319,7 @@ static int krb5_set_passwd(
 		     " for user %s: %s\n",
 		     op->o_log_prefix, user_uid, error_message(retval));
 		rc = LDAP_CONNECT_ERROR;
-		goto mitkrb_error_with_mutex_lock;
+		goto finish;
 	}
 
 	params.mask |= KADM5_CONFIG_REALM;
@@ -369,8 +415,6 @@ mitkrb_error_with_user_princstr:
 	free(user_princstr);
 mitkrb_error_with_context:
 	krb5_free_context(context);
-mitkrb_error_with_mutex_lock:
-	ldap_pvt_thread_mutex_unlock(&pi->krb5_mutex);
 finish:
 	if (user_uid)
 	  free(user_uid);
@@ -378,7 +422,7 @@ finish:
 	if (user_password)
 	  free(user_password);
 
-	return rc;
+	_exit(rc);
 }
 
 static int smbkrb5pwd_exop_passwd(
