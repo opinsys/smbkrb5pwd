@@ -96,7 +96,7 @@ The overlay accepts the following configuration attributes:
   - Enable samba/kerberos functionality of the module, same as 
     olcSmbK5PwdEnable in smbk5pwd. If attribute is not set or both are set, 
     both passwords are changed.
-* olcSmbKrb5PwdMustChange - e.g. 31536000 (year), 2592000 (30 seconds)
+* olcSmbKrb5PwdMustChange - e.g. 31536000 (year), 2592000 (30 days)
   - Time in seconds before the password expires (currently affects only Samba)
 * olcSmbKrb5PwdKrb5Realm - e.g. EDU.EXAMPLE.ORG
   - Kerberos realm used to create user principals
